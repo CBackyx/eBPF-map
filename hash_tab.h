@@ -6,7 +6,22 @@
 struct bpf_map;
 struct bpf_map_ops;
 
+#define bool char
+#define true 1
+#define false 0
+
 #define BPF_OBJ_NAME_LEN 16U
+
+typedef unsigned char __u8;
+typedef __u8  u8;
+
+typedef unsigned long long __u64;
+typedef __u64 u64;
+
+typedef unsigned int __u32;
+typedef __u32 u32;
+
+struct __una_u32 { u32 x; };
 
 enum bpf_map_type {
 	BPF_MAP_TYPE_UNSPEC,
@@ -105,7 +120,7 @@ struct freelist_node *freelist_pop(struct freelist *);
 void freelist_populate(struct freelist *s, void *buf, u32 elem_size,
 			    u32 nr_elems);
 int freelist_init(struct freelist *);
-void freelist_push(struct freelist *, struct freelist_node *);
+void freelist_push(struct freelist_head *, struct freelist_node *);
 void freelist_destroy(struct freelist *s);
 
 union bpf_attr {
@@ -127,7 +142,7 @@ union bpf_attr {
 		__u32	btf_key_type_id;	/* BTF type_id of the key */
 		__u32	btf_value_type_id;	/* BTF type_id of the value */
 	};
-}
+};
 
 void bpf_map_init_from_attr(struct bpf_map *map, union bpf_attr *attr);
 
@@ -154,16 +169,6 @@ static unsigned int roundup_pow_of_two(unsigned int x)
 
 #define U32_MAX		((u32)~0U)
 
-typedef unsigned char __u8;
-typedef __u8  u8;
-
-typedef unsigned long long __u64;
-typedef __u64 u64;
-
-typedef unsigned int __u32;
-typedef __u32 u32;
-
-struct __una_u32 { u32 x; };
 
 static inline u32 __get_unaligned_cpu32(const void *p)
 {
@@ -245,7 +250,6 @@ struct bpf_map_ops {
 	/* funcs callable from userspace (via syscall) */
 	int (*map_alloc_check)(union bpf_attr *attr);
 	struct bpf_map *(*map_alloc)(union bpf_attr *attr);
-	void (*map_release)(struct bpf_map *map, struct file *map_file);
 	void (*map_free)(struct bpf_map *map);
 	int (*map_get_next_key)(struct bpf_map *map, void *key, void *next_key);
 	void (*map_release_uref)(struct bpf_map *map);
@@ -295,5 +299,6 @@ static void hlist_nulls_add_head(struct hlist_nulls_node *n,
 					struct hlist_nulls_head *h);
 
 static void hlist_nulls_del(struct hlist_nulls_node *n);
+
 
 #endif

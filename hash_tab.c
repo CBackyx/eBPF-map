@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2011-2014 PLUMgrid, http://plumgrid.com
- * Copyright (c) 2016 Facebook
- */
 #include "pthread.h"
 #include "hash_tab.h"
+#include "stdlib.h"
+#include "stdio.h"
+#include "string.h"
 
 struct bucket {
 	struct hlist_nulls_head head;
@@ -15,15 +14,21 @@ struct bpf_htab {
 	struct bucket *buckets;
 	void *elems;
 
-	struct freelist freelist;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           freelist freelist;
+	struct freelist freelist;
 
 	struct htab_elem *extra_elems;
 	u32 count;	/* number of elements in this hashtable */
-	pthread_mutex_lock count_lock;
+	pthread_mutex_t count_lock;
 	u32 n_buckets;	/* number of hash buckets */
 	u32 elem_size;	/* size of each element in bytes */
 	u32 hashrnd;
 };
+
+void atomic_dec_count(struct bpf_htab *htab);
+
+void atomic_inc_count(struct bpf_htab *htab);
+
+u32 atomic_inc_count_return(struct bpf_htab *htab);
 
 /* each htab element is struct htab_elem + key + value */
 struct htab_elem {
@@ -54,7 +59,7 @@ static struct htab_elem *get_htab_elem(struct bpf_htab *htab, int i)
 
 static void htab_free_elems(struct bpf_htab *htab)
 {
-	rt_free(htab->elems);
+	free(htab->elems);
 }
 
 static int prealloc_init(struct bpf_htab *htab)
@@ -64,7 +69,7 @@ static int prealloc_init(struct bpf_htab *htab)
 
 	num_entries += 1;
 
-	htab->elems = rt_malloc(htab->elem_size * num_entries);
+	htab->elems = malloc(htab->elem_size * num_entries);
 	if (!htab->elems)
 		return -ENOMEM;
 
@@ -155,7 +160,7 @@ static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
 	int err, i;
 	u64 cost;
 
-	htab = rt_malloc(sizeof(*htab));
+	htab = (struct bpf_htab*)malloc(sizeof(*htab));
 	if (!htab)
 		return NULL;
 
@@ -183,7 +188,7 @@ static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
 	cost += (u64) htab->elem_size;
 
 	err = -ENOMEM;
-	htab->buckets = rt_malloc(htab->n_buckets *
+	htab->buckets = (struct bucket*)malloc(htab->n_buckets *
 					   sizeof(struct bucket));
 	if (!htab->buckets)
 		goto free_htab;
@@ -192,7 +197,7 @@ static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
 
 	for (i = 0; i < htab->n_buckets; i++) {
 		htab->buckets[i].head.first = NULL;
-		pthread_mutex_init(&htab->buckets[i].lock);
+		pthread_mutex_init(&htab->buckets[i].lock, NULL);
 	}
 
 	if (prealloc) {
@@ -210,9 +215,9 @@ static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
 free_prealloc:
 	prealloc_destroy(htab);
 free_buckets:
-	rt_free(htab->buckets);
+	free(htab->buckets);
 free_htab:
-	rt_free(htab);
+	free(htab);
 	return NULL;
 }
 
@@ -276,7 +281,7 @@ again:
 	}
 
 	// TODO: not understand
-	if (unlikely(get_nulls_value(n) != (hash & (n_buckets - 1))))
+	if (get_nulls_value(n) != (hash & (n_buckets - 1)))
 		goto again;
 
 	return NULL;
@@ -342,7 +347,7 @@ static int htab_map_get_next_key(struct bpf_map *map, void *key, void *next_key)
 		goto find_first_elem;
 
 	/* key was found, get next key in the same bucket */
-	nn = l->hash_node;
+	nn = &l->hash_node;
 
 	if (nn = NULL) goto find_first_elem;
 	nn = nn->next;
@@ -380,7 +385,7 @@ find_first_elem:
 
 static void htab_elem_free(struct bpf_htab *htab, struct htab_elem *l)
 {
-	rt_free(l);
+	free(l);
 }
 
 
@@ -389,7 +394,7 @@ static void free_htab_elem(struct bpf_htab *htab, struct htab_elem *l)
 	struct bpf_map *map = &htab->map;
 
 	if (htab_is_prealloc(htab)) {
-		freelist_push(&htab->freelist, &l->fnode);
+		freelist_push(htab->freelist.freelist, &l->fnode);
 	} else {
 		atomic_dec_count(htab);
 		l->htab = htab;
@@ -434,7 +439,7 @@ static struct htab_elem *alloc_htab_elem(struct bpf_htab *htab, void *key,
 				l_new = NULL;
 				goto dec_count;
 			}
-		l_new = rt_malloc(htab->elem_size);
+		l_new = (struct htab_elem*)malloc(htab->elem_size);
 		if (!l_new) {
 			l_new = NULL;
 			goto dec_count;
@@ -510,7 +515,7 @@ static int htab_map_delete_elem(struct bpf_map *map, void *key)
 	struct htab_elem *l;
 	unsigned long flags;
 	u32 hash, key_size;
-	int ret = -ENOENT;
+	int ret = -1;
 
 	key_size = map->key_size;
 
@@ -567,8 +572,8 @@ static void htab_map_free(struct bpf_map *map)
 	else
 		prealloc_destroy(htab);
 
-	rt_free(htab->buckets);
-	rt_free(htab);
+	free(htab->buckets);
+	free(htab);
 }
 
 
@@ -586,7 +591,7 @@ const struct bpf_map_ops htab_map_ops = {
 // Code added by CBackyx
 
 int freelist_init(struct freelist * s) {
-	rt_malloc(s->freelist, sizeof(*s->freelist));
+	s->freelist = (struct freelist_head*)malloc(sizeof(*s->freelist));
 	pthread_mutex_init(&(s->freelist->lock), NULL);
 }
 
@@ -607,16 +612,14 @@ void freelist_populate(struct freelist *s, void *buf, u32 elem_size,
 	// TODO: disable the interrupt
 again:
 	head = s->freelist;
-	freelist_push(head, buf);
+	freelist_push(head, (struct freelist_node*)buf);
 	i++;
 	buf += elem_size;
-	if (i == nr_elems)
-		break;
 	if (i < nr_entries)
 		goto again;
 }
 
-static inline void freelist_push(struct freelist_head *head,
+void freelist_push(struct freelist_head *head,
 					 struct freelist_node *node)
 {
 	pthread_mutex_lock(&head->lock);
@@ -627,7 +630,7 @@ static inline void freelist_push(struct freelist_head *head,
 
 void freelist_destroy(struct freelist *s)
 {
-	rt_free(s->freelist);
+	free(s->freelist);
 }
 
 struct freelist_node *freelist_pop(struct freelist *s)
@@ -657,65 +660,26 @@ void bpf_map_init_from_attr(struct bpf_map *map, union bpf_attr *attr)
 	map->map_flags = attr->map_flags;
 }
 
-static inline u32 jhash(const void *key, u32 length, u32 initval)
-{
-	u32 a, b, c;
-	const u8 *k = key;
-
-	/* Set up the internal state */
-	a = b = c = JHASH_INITVAL + length + initval;
-
-	/* All but the last block: affect some 32 bits of (a,b,c) */
-	while (length > 12) {
-		a += __get_unaligned_cpu32(k);
-		b += __get_unaligned_cpu32(k + 4);
-		c += __get_unaligned_cpu32(k + 8);
-		__jhash_mix(a, b, c);
-		length -= 12;
-		k += 12;
-	}
-	/* Last block: affect all 32 bits of (c) */
-	switch (length) {
-	case 12: c += (u32)k[11]<<24;	/* fall through */
-	case 11: c += (u32)k[10]<<16;	/* fall through */
-	case 10: c += (u32)k[9]<<8;	/* fall through */
-	case 9:  c += k[8];		/* fall through */
-	case 8:  b += (u32)k[7]<<24;	/* fall through */
-	case 7:  b += (u32)k[6]<<16;	/* fall through */
-	case 6:  b += (u32)k[5]<<8;	/* fall through */
-	case 5:  b += k[4];		/* fall through */
-	case 4:  a += (u32)k[3]<<24;	/* fall through */
-	case 3:  a += (u32)k[2]<<16;	/* fall through */
-	case 2:  a += (u32)k[1]<<8;	/* fall through */
-	case 1:  a += k[0];
-		 __jhash_final(a, b, c);
-	case 0: /* Nothing left to add */
-		break;
-	}
-
-	return c;
-}
-
-void atomic_dec_count(bpf_htab *htab) {
+void atomic_dec_count(struct bpf_htab *htab) {
 	pthread_mutex_lock(&htab->count_lock);
 	htab->count--;
 	pthread_mutex_unlock(&htab->count_lock);
 }
 
-void atomic_inc_count(bpf_htab *htab) {
+void atomic_inc_count(struct bpf_htab *htab) {
 	pthread_mutex_lock(&htab->count_lock);
 	htab->count++;
 	pthread_mutex_unlock(&htab->count_lock);
 }
 
-u32 atomic_inc_count(bpf_htab *htab) {
+u32 atomic_inc_count_return(struct bpf_htab *htab) {
 	pthread_mutex_lock(&htab->count_lock);
 	htab->count++;
 	pthread_mutex_unlock(&htab->count_lock);
 	return htab->count;
 }
 
-static void hlist_nulls_add_head(struct hlist_nulls_node *n,
+void hlist_nulls_add_head(struct hlist_nulls_node *n,
 					struct hlist_nulls_head *h)
 {
 	struct hlist_nulls_node *first = h->first;
@@ -727,7 +691,7 @@ static void hlist_nulls_add_head(struct hlist_nulls_node *n,
 		first->pprev = &n->next;
 }
 
-static void hlist_nulls_del(struct hlist_nulls_node *n)
+void hlist_nulls_del(struct hlist_nulls_node *n)
 {
 	struct hlist_nulls_node *next = n->next;
 	struct hlist_nulls_node **pprev = n->pprev;
